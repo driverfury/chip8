@@ -1,8 +1,9 @@
 /**
  * TODO:
+ * [x] Bug thread still "running"
+ * [x] .ini configuration file
+ * [ ] Bug colors
  * [ ] Sound
- * [ ] .ini configuration file (or alternatively, save the
- *     configurations inside the exe).
  */
 
 /*********************************************************/
@@ -26,6 +27,20 @@ typedef int32_t b32;
 typedef float r32;
 typedef double r64;
 
+#define CHIP8_REGS 16
+#define CHIP8_MEM_SIZE 0x1000
+#define CHIP8_SCR_W 64
+#define CHIP8_SCR_H 32
+#define CHIP8_SCR_PIXSIZE 16
+#define CHIP8_ENTRY 0x200
+#define CHIP8_KEYS_NUM 16
+#define CHIP8_STACK_SIZE 16
+#define CHIP8_FONT_ADDR 0x0000
+#define CHIP8_TIMER_FREQ_HZ 60
+#define CHIP8_FREQ_HZ 500
+#define CHIP8_PIXON 0xffffffff
+#define CHIP8_PIXOFF 0x00000000
+
 #include <windows.h>
 
 #define EZ_NO_CRT_LIB
@@ -36,7 +51,15 @@ typedef double r64;
 /**                        UTILS                        **/
 /*********************************************************/
 
+#define Min(x,y) (((x)<(y))?(x):(y))
+#define Max(x,y) (((x)>(y))?(x):(y))
+
 #define ArrayCount(a) (sizeof(a)/sizeof((a)[0]))
+
+#define IsDigit(c) ((c)>='0'&&(c)<='9')
+#define IsAlpha(c) (((c)>='a'&&(c)<='z')||((c)>='A'&&(c)<='Z'))
+#define IsAlnum(c) (IsDigit(c)||IsAlpha(c))
+#define IsSpace(c) ((c)==' '||(c)=='\t'||(c)=='\v'||(c)=='\r'||(c)=='\n'||(c)=='\f')
 
 u32 RandomIndex = 0;
 u8 RandomNums[] = {
@@ -115,6 +138,265 @@ GetRandom(void)
     return(Num);
 }
 
+u64
+Win32PerformanceFrequency(void)
+{
+    u64 Result;
+    LARGE_INTEGER LargeInt;
+
+    QueryPerformanceFrequency(&LargeInt);
+    Result = LargeInt.QuadPart;
+
+    return(Result);
+}
+
+u64
+Win32GetTickCount(void)
+{
+    u64 Result;
+    LARGE_INTEGER LargeInt;
+
+    QueryPerformanceCounter(&LargeInt);
+    Result = LargeInt.QuadPart;
+
+    return(Result);
+}
+
+b32
+StrEq(char *s1, char *s2)
+{
+    while(*s1 && *s2)
+    {
+        if(*s1 != *s2)
+        {
+            return(0);
+        }
+        ++s1;
+        ++s2;
+    }
+    return((*s1 == *s2) ? 1 : 0);
+}
+
+int
+ParseInt(char *tok)
+{
+    int Value = 0;
+    while(IsDigit(*tok))
+    {
+        Value = Value*10 + (int)(*tok - '0');
+        ++tok;
+    }
+    return(Value);
+}
+
+u32
+ParseColor(char *tok)
+{
+    u32 Color;
+    u8 R, G, B;
+
+    R = 0;
+    while(IsDigit(*tok))
+    {
+        R = R*10 + (u8)(*tok - '0');
+        ++tok;
+    }
+    if(*tok) ++tok;
+
+    G = 0;
+    while(IsDigit(*tok))
+    {
+        G = G*10 + (u8)(*tok - '0');
+        ++tok;
+    }
+    if(*tok) ++tok;
+
+    B = 0;
+    while(IsDigit(*tok))
+    {
+        B = B*10 + (u8)(*tok - '0');
+        ++tok;
+    }
+
+    Color = (0xff << 3*8) |
+            (  R  << 2*8) |
+            (  G  << 1*8) |
+            (  B  << 0*8);
+    return(Color);
+}
+
+typedef struct
+chip8_settings
+{
+    u32 ScreenWidth;
+    u32 ScreenHeight;
+    u32 PixelSize;
+    u32 PixelOn;
+    u32 PixelOff;
+    u64 FreqHz;
+    u64 TimerFreqHz;
+
+    u32 Keys[0xf];
+
+} chip8_settings;
+
+void
+LoadDefaultSettings(chip8_settings *Settings)
+{
+    Settings->ScreenWidth  = CHIP8_SCR_W;
+    Settings->ScreenHeight = CHIP8_SCR_H;
+    Settings->PixelSize = CHIP8_SCR_PIXSIZE;
+    Settings->PixelOn = CHIP8_PIXON;
+    Settings->PixelOff = CHIP8_PIXOFF;
+    Settings->FreqHz = CHIP8_FREQ_HZ;
+    Settings->TimerFreqHz = CHIP8_TIMER_FREQ_HZ;
+
+    u32 Index;
+    for(Index = 0;
+        Index < 10;
+        ++Index)
+    {
+        Settings->Keys[0x0 + Index] = 0x30 + Index;
+    }
+    for(Index = 0;
+        Index < 6;
+        ++Index)
+    {
+        Settings->Keys[0xa + Index] = 0x41 + Index;
+    }
+}
+
+void
+LoadSettingsFromFile(chip8_settings *Settings, char *FileName)
+{
+#define KEY_MACRO(K,n)\
+    if(StrEq(Key, K))\
+        Settings->Keys[n] = (u32)ParseInt(Value);
+
+    char *Content;
+    size_t ContentSize;
+
+    Content = ez_file_read_text(FileName, &ContentSize);
+    if(!Content)
+    {
+        return;
+    }
+
+    char Key[32];
+    char Value[32];
+    u32 Index;
+    char *ContentEnd = Content + ContentSize;
+    char *Ptr = Content;
+    while(Ptr < ContentEnd)
+    {
+        while(Ptr < ContentEnd && IsSpace(*Ptr))
+        {
+            ++Ptr;
+        }
+
+        if(Ptr < ContentEnd && IsAlpha(*Ptr))
+        {
+            // Key
+            Index = 0;
+            while(Ptr < ContentEnd && IsAlnum(*Ptr))
+            {
+                Key[Index++] = *Ptr; // Assert size < 32
+                ++Ptr;
+            }
+            Key[Index] = 0;
+
+            // = (set to)
+            if(!(Ptr < ContentEnd && *Ptr == '='))
+            {
+                return;
+            }
+            ++Ptr;
+
+            // Value
+            if(!(Ptr < ContentEnd && IsAlnum(*Ptr)))
+            {
+                return;
+            }
+            Index = 0;
+            while(Ptr < ContentEnd && !IsSpace(*Ptr))
+            {
+                Value[Index++] = *Ptr; // Assert size < 32
+                ++Ptr;
+            }
+            Value[Index] = 0;
+
+            if(StrEq(Key, "SCRW"))
+            {
+                Settings->ScreenWidth = (u32)ParseInt(Value);
+            }
+            else if(StrEq(Key, "SCRH"))
+            {
+                Settings->ScreenHeight = (u32)ParseInt(Value);
+            }
+            else if(StrEq(Key, "FREQ"))
+            {
+                u64 Freq = (u64)ParseInt(Value);
+                if(Freq > 0)
+                {
+                    Settings->FreqHz = Freq;
+                }
+                else
+                {
+                    Settings->FreqHz = Win32PerformanceFrequency();
+                }
+            }
+            else if(StrEq(Key, "TFREQ"))
+            {
+                u64 Freq = (u64)ParseInt(Value);
+                if(Freq > 0)
+                {
+                    Settings->TimerFreqHz = Freq;
+                }
+                else
+                {
+                    Settings->TimerFreqHz = CHIP8_TIMER_FREQ_HZ;
+                }
+            }
+            else if(StrEq(Key, "PIXSZ"))
+            {
+                u32 PixelSize = (u32)ParseInt(Value);
+                PixelSize = Max(PixelSize, 1);
+                Settings->PixelSize = PixelSize;
+            }
+            else if(StrEq(Key, "PIXON"))
+            {
+                Settings->PixelOn = ParseColor(Value);
+            }
+            else if(StrEq(Key, "PIXOFF"))
+            {
+                Settings->PixelOff = ParseColor(Value);
+            }
+            else KEY_MACRO("KEY0", 0x0)
+            else KEY_MACRO("KEY1", 0x1)
+            else KEY_MACRO("KEY2", 0x2)
+            else KEY_MACRO("KEY3", 0x3)
+            else KEY_MACRO("KEY4", 0x4)
+            else KEY_MACRO("KEY5", 0x5)
+            else KEY_MACRO("KEY6", 0x6)
+            else KEY_MACRO("KEY7", 0x7)
+            else KEY_MACRO("KEY8", 0x8)
+            else KEY_MACRO("KEY9", 0x9)
+            else KEY_MACRO("KEYA", 0xa)
+            else KEY_MACRO("KEYB", 0xb)
+            else KEY_MACRO("KEYC", 0xc)
+            else KEY_MACRO("KEYD", 0xd)
+            else KEY_MACRO("KEYE", 0xe)
+            else KEY_MACRO("KEYF", 0xf)
+        }
+        else
+        {
+            ++Ptr;
+        }
+    }
+
+#undef KEY_MACRO
+}
+
 /*********************************************************/
 /**                         GFX                         **/
 /*********************************************************/
@@ -124,17 +406,16 @@ int   BufferHeight = 0;
 void *BufferMemory = 0;
 int   BufferMemorySize = 0;
 BITMAPINFO BitmapInfo = {0};
-int   PixelSize = 16;
 
 void
-ClearScreen(void)
+ClearScreen(u32 Color)
 {
     int PixelIndex;
     for(PixelIndex = 0;
         PixelIndex < BufferWidth*BufferHeight;
         ++PixelIndex)
     {
-        ((u32 *)BufferMemory)[PixelIndex] = 0x00000000;
+        ((u32 *)BufferMemory)[PixelIndex] = Color;
     }
 }
 
@@ -155,17 +436,6 @@ GetPixelColor(u32 X, u32 Y)
 /*********************************************************/
 /**                        CHIP-8                       **/
 /*********************************************************/
-
-#define CHIP8_REGS 16
-#define CHIP8_MEM_SIZE 0x1000
-#define CHIP8_SCR_W 64
-#define CHIP8_SCR_H 32
-#define CHIP8_ENTRY 0x200
-#define CHIP8_KEYS_NUM 16
-#define CHIP8_STACK_SIZE 16
-#define CHIP8_FONT_ADDR 0x0000
-#define CHIP8_TIMER_FREQ_HZ 60
-#define CHIP8_FREQ_HZ 500
 
 typedef struct
 chip8
@@ -210,7 +480,7 @@ Fetch16(chip8 *Chip8)
 }
 
 void
-Execute(chip8 *Chip8)
+Execute(chip8 *Chip8, chip8_settings *Settings)
 {
 #define GET_nnn(o) (((o)&0x0fff) >> 0)
 #define GET_n(o)   (((o)&0x000f) >> 0)
@@ -243,7 +513,7 @@ Execute(chip8 *Chip8)
             // CLS
             if(Ins == 0x00e0)
             {
-                ClearScreen();
+                ClearScreen(Settings->PixelOff);
             }
             // RET
             else if(Ins == 0x00ee)
@@ -347,8 +617,8 @@ Execute(chip8 *Chip8)
             u8 Line;
             b32 Collision = 0;
             u32 Color = 0, PrevColor = 0;
-            u32 CordX = (u32)Chip8->V[x] % CHIP8_SCR_W;
-            u32 CordY = (u32)Chip8->V[y] % CHIP8_SCR_H;
+            u32 CordX = (u32)Chip8->V[x] % Settings->ScreenWidth;
+            u32 CordY = (u32)Chip8->V[y] % Settings->ScreenHeight;
             for(u8 Index = 0;
                 Index < n;
                 ++Index)
@@ -359,17 +629,17 @@ Execute(chip8 *Chip8)
                     BitIndex < 8;
                     ++BitIndex)
                 {
-                    if(CordX+BitIndex < CHIP8_SCR_W && CordY < CHIP8_SCR_H)
+                    if(CordX+BitIndex < Settings->ScreenWidth && CordY < Settings->ScreenHeight)
                     {
                         PrevColor = GetPixelColor(CordX+BitIndex, CordY);
-                        Color = (Line & ((u8)1 << (7 - (u8)BitIndex))) ? 0xffffffff : 0x00000000;
-                        if(Color != 0 && PrevColor != 0)
+                        Color = (Line & ((u8)1 << (7 - (u8)BitIndex))) ? Settings->PixelOn : Settings->PixelOff;
+                        if(Color != Settings->PixelOff && PrevColor != Settings->PixelOff)
                         {
-                            Color = 0;
+                            Color = Settings->PixelOff;
                             Collision = 1;
                             DrawPixel(CordX+BitIndex, CordY, Color);
                         }
-                        else if(Color != 0 && PrevColor == 0)
+                        else if(Color != Settings->PixelOff && PrevColor == Settings->PixelOff)
                         {
                             DrawPixel(CordX+BitIndex, CordY, Color);
                         }
@@ -512,7 +782,8 @@ int _fltused = 0;
 #endif
 
 b32 GlobalRunning;
-chip8 GlobalChip8 = {0};
+chip8 GlobalChip8;
+chip8_settings GlobalChip8Settings;
 
 LRESULT CALLBACK
 Win32WindowCallback(
@@ -548,28 +819,28 @@ Win32WindowCallback(
 
         case WM_KEYDOWN:
         {
-            if(WParam >= 0x30 && WParam <= 0x39)
+            for(u32 Index = 0;
+                Index < CHIP8_KEYS_NUM;
+                ++Index)
             {
-                GlobalChip8.Keys[WParam - 0x30] = 1;
+                if(WParam == GlobalChip8Settings.Keys[Index])
+                {
+                    GlobalChip8.Keys[Index] = 1;
+                }
             }
-            else if(WParam >= 0x41 && WParam <= 0x46)
-            {
-                GlobalChip8.Keys[WParam - 0x41 + 10] = 1;
-            }
-            OutputDebugStringA("WM_KEYDOWN");
         } break;
 
         case WM_KEYUP:
         {
-            if(WParam >= 0x30 && WParam <= 0x39)
+            for(u32 Index = 0;
+                Index < CHIP8_KEYS_NUM;
+                ++Index)
             {
-                GlobalChip8.Keys[WParam - 0x30] = 0;
+                if(WParam == GlobalChip8Settings.Keys[Index])
+                {
+                    GlobalChip8.Keys[Index] = 0;
+                }
             }
-            else if(WParam >= 0x41 && WParam <= 0x46)
-            {
-                GlobalChip8.Keys[WParam - 0x41 + 10] = 0;
-            }
-            OutputDebugStringA("WM_KEYUP");
         } break;
 
         default:
@@ -577,30 +848,6 @@ Win32WindowCallback(
             Result = DefWindowProcA(Window, Message, WParam, LParam);
         } break;
     }
-
-    return(Result);
-}
-
-u64
-Win32PerformanceFrequency(void)
-{
-    u64 Result;
-    LARGE_INTEGER LargeInt;
-
-    QueryPerformanceFrequency(&LargeInt);
-    Result = LargeInt.QuadPart;
-
-    return(Result);
-}
-
-u64
-Win32GetTickCount(void)
-{
-    u64 Result;
-    LARGE_INTEGER LargeInt;
-
-    QueryPerformanceCounter(&LargeInt);
-    Result = LargeInt.QuadPart;
 
     return(Result);
 }
@@ -648,7 +895,7 @@ DecTimers(LPVOID Param)
 
     while(GlobalRunning)
     {
-        Sleep((DWORD)((1000.0f/CHIP8_TIMER_FREQ_HZ)));
+        Sleep((DWORD)((1000.0f/GlobalChip8Settings.TimerFreqHz)));
         if(Chip8->DT > 0)
         {
             Chip8->DT -= 1;
@@ -680,6 +927,9 @@ Win32Main(HINSTANCE Instance, HINSTANCE PrevInstance, PSTR CmdLine, INT CmdShow)
 
     char *RomFileName = CmdLinePtr;
 
+    LoadDefaultSettings(&GlobalChip8Settings);
+    LoadSettingsFromFile(&GlobalChip8Settings, "config.ini");
+
     // Create window
 #if 0
     HINSTANCE Instance = GetModuleHandle(0);
@@ -707,8 +957,8 @@ Win32Main(HINSTANCE Instance, HINSTANCE PrevInstance, PSTR CmdLine, INT CmdShow)
     }
 
     // Create screen buffer
-    BufferWidth  = CHIP8_SCR_W;
-    BufferHeight = CHIP8_SCR_H;
+    BufferWidth  = GlobalChip8Settings.ScreenWidth;
+    BufferHeight = GlobalChip8Settings.ScreenHeight;
     BitmapInfo.bmiHeader.biSize        = sizeof(BitmapInfo.bmiHeader);
     BitmapInfo.bmiHeader.biWidth       = BufferWidth;
     BitmapInfo.bmiHeader.biHeight      = BufferHeight*(-1);
@@ -724,7 +974,7 @@ Win32Main(HINSTANCE Instance, HINSTANCE PrevInstance, PSTR CmdLine, INT CmdShow)
     {
         ExitProcess(1);
     }
-    ClearScreen();
+    ClearScreen(GlobalChip8Settings.PixelOff);
 
     // Resize the window to fit the screen buffer
     RECT Rect = {0};
@@ -732,8 +982,8 @@ Win32Main(HINSTANCE Instance, HINSTANCE PrevInstance, PSTR CmdLine, INT CmdShow)
     {
         ExitProcess(1);
     }
-    Rect.right  = Rect.left + BufferWidth*PixelSize;
-    Rect.bottom = Rect.top  + BufferHeight*PixelSize;
+    Rect.right  = Rect.left + BufferWidth*GlobalChip8Settings.PixelSize;
+    Rect.bottom = Rect.top  + BufferHeight*GlobalChip8Settings.PixelSize;
     if(!AdjustWindowRect(&Rect, WS_OVERLAPPEDWINDOW|WS_VISIBLE, 0))
     {
         ExitProcess(1);
@@ -785,6 +1035,7 @@ Win32Main(HINSTANCE Instance, HINSTANCE PrevInstance, PSTR CmdLine, INT CmdShow)
     {
         Memory[CHIP8_ENTRY + Index] = Rom[Index];
     }
+    ez_mem_free((void *)Rom);
 #endif
 
 
@@ -826,13 +1077,15 @@ Win32Main(HINSTANCE Instance, HINSTANCE PrevInstance, PSTR CmdLine, INT CmdShow)
         }
 
         // Console emulation
-        Execute(&GlobalChip8);
+        Execute(&GlobalChip8, &GlobalChip8Settings);
 
         // Screen buffer rendering
         HDC DeviceContext = GetDC(Window);
         int LinesCopied = StretchDIBits(
             DeviceContext,
-            0, 0, BufferWidth*PixelSize, BufferHeight*PixelSize,
+            0, 0,
+            BufferWidth*GlobalChip8Settings.PixelSize,
+            BufferHeight*GlobalChip8Settings.PixelSize,
             0, 0, BufferWidth, BufferHeight,
             BufferMemory, &BitmapInfo,
             DIB_RGB_COLORS, SRCCOPY);
@@ -847,6 +1100,7 @@ Win32Main(HINSTANCE Instance, HINSTANCE PrevInstance, PSTR CmdLine, INT CmdShow)
     }
 
     // Exit
+    TerminateThread(DecTimersHandle, 0);
     CloseHandle(DecTimersHandle);
     return(0);
 }
