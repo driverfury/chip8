@@ -1,9 +1,9 @@
 # Chip-8 Emulator
 
 ## Supported Platforms
-(x) Windows
-( ) Linux
-( ) MacOS
+- [x] Windows
+- [ ] Linux
+- [ ] MacOS
 
 ## Configuration file
 
@@ -43,4 +43,4 @@ With ```SCRW``` and ```SCRH``` you can set the Chip-8 screen size.
 
 ```FREQ``` is the frequency (in Hz) of each frame (instruction execution) while ```TFREQ``` is the timers frequency (60Hz is the standard for Chip-8).
 
-With ```KEY0```- ```KEYF``` you can bind the 0-F keys of the Chip-8 with the [scancode](https://docs.microsoft.com/en-us/windows/win32/inputdev/virtual-key-codes) of keys on your keyboard.
+With ```KEY0```-```KEYF``` you can bind the 0-F keys of the Chip-8 with the [scancode](https://docs.microsoft.com/en-us/windows/win32/inputdev/virtual-key-codes) of keys on your keyboard.
